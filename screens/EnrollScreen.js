@@ -14,9 +14,6 @@ import {
 import ReactNativeBiometrics from 'react-native-biometrics';
 import NfcManager, { NfcTech, Ndef } from 'react-native-nfc-manager';
 import Barcode from 'react-native-barcode-builder';
-import { Camera, useCameraDevice } from 'react-native-vision-camera';
-import FaceDetection from '@react-native-ml-kit/face-detection';
-import FaceRecognitionService from '../services/FaceRecognitionService';
 import RNFS from 'react-native-fs';
 
 // Import new services
@@ -35,19 +32,7 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
   const [showBarcodeModal, setShowBarcodeModal] = useState(false);
   const [currentBarcode, setCurrentBarcode] = useState(null);
   
-  // Face Recognition States
-  const [showFaceCamera, setShowFaceCamera] = useState(false);
-  const [faceDetected, setFaceDetected] = useState(null);
-  const [faceQuality, setFaceQuality] = useState(null);
-  const [capturing, setCapturing] = useState(false);
-  const [cameraPermission, setCameraPermission] = useState(null);
-  const cameraRef = React.useRef(null);
-  
-  const device = useCameraDevice('front');
-  
-  // Check camera permission
   useEffect(() => {
-    checkCameraPermission();
     analyticsService.trackScreenView('EnrollScreen');
   }, []);
 
@@ -73,16 +58,6 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
     }
   };
   
-  const checkCameraPermission = async () => {
-    const status = await Camera.getCameraPermissionStatus();
-    setCameraPermission(status);
-    
-    if (status !== 'granted') {
-      const newStatus = await Camera.requestCameraPermission();
-      setCameraPermission(newStatus);
-    }
-  };
-
   const enrollWithFingerprint = async () => {
     HapticFeedback.light();
     
@@ -415,207 +390,9 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
   };
 
   // ==================== FACE ENROLLMENT (ENTERPRISE SECURITY) ====================
-  const enrollWithFace = async () => {
-    if (!userName.trim() || !userId.trim()) {
-      Alert.alert('⚠️ Missing Info', 'Please enter both name and ID');
-      return;
-    }
 
-    // Check camera permission
-    if (cameraPermission !== 'granted') {
-      Alert.alert('❌ Permission Required', 'Camera permission is required for face enrollment');
-      await checkCameraPermission();
-      return;
-    }
 
-    // Check if user exists
-    const existingIndex = systemData.enrolledUsers.findIndex(u => u.userId === userId);
-    const existing = existingIndex >= 0 ? systemData.enrolledUsers[existingIndex] : null;
-    
-    if (existing && existing.hasFace) {
-      Alert.alert('ℹ️ Already Has Face', `${existing.userName} already has face enrolled.`);
-      return;
-    }
 
-    // Show instructions
-    Alert.alert(
-      '👤 Face Enrollment',
-      `SECURITY REQUIREMENTS:\n\n` +
-      `✓ Look directly at camera\n` +
-      `✓ Keep head straight (no tilt)\n` +
-      `✓ Ensure good lighting\n` +
-      `✓ Remove glasses/hats\n` +
-      `✓ Neutral expression\n` +
-      `✓ Liveness detection will verify you're real\n\n` +
-      `Ready to capture face for ${userName}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Start Capture',
-          onPress: () => setShowFaceCamera(true),
-        },
-      ]
-    );
-  };
-
-  const captureFace = async () => {
-    if (capturing || !cameraRef.current) return;
-    
-    setCapturing(true);
-    
-    try {
-      // Take photo
-      const photo = await cameraRef.current.takePhoto({
-        qualityPrioritization: 'quality',
-        enableShutterSound: false,
-      });
-      
-      // Detect faces in the photo using ML Kit
-      const faces = await FaceDetection.detect(photo.path, {
-        performanceMode: 'accurate',
-        landmarkMode: 'all',
-        contourMode: 'all',
-        classificationMode: 'all',
-      });
-      
-      if (faces.length === 0) {
-        setCapturing(false);
-        Alert.alert('❌ No Face Detected', 'Please position your face in the frame and try again.');
-        return;
-      }
-      
-      if (faces.length > 1) {
-        setCapturing(false);
-        Alert.alert('⚠️ Multiple Faces', 'Only one face should be in the frame. Please try again.');
-        return;
-      }
-      
-      const detectedFace = faces[0];
-      
-      // Validate face quality
-      const validation = FaceRecognitionService.validateFaceQuality(detectedFace);
-      
-      if (!validation.isValid) {
-        setCapturing(false);
-        Alert.alert('⚠️ Face Quality Issue', validation.errors.join('\n'));
-        // Clean up photo
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      // Detect liveness (anti-spoofing)
-      const livenessResult = await FaceRecognitionService.detectLiveness(detectedFace, null);
-      
-      if (!livenessResult.isLive) {
-        setCapturing(false);
-        Alert.alert(
-          '❌ Liveness Check Failed',
-          `Score: ${livenessResult.score}/100\n\n` +
-          `Please ensure:\n` +
-          `• You are a real person (not a photo)\n` +
-          `• Keep eyes open\n` +
-          `• Move head slightly`
-        );
-        FaceRecognitionService.logAttempt('enrollment_failed', userId, false, { reason: 'liveness_failed', score: livenessResult.score });
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      // Extract face features
-      const faceFeatures = FaceRecognitionService.extractFaceFeatures(detectedFace);
-      
-      // Encrypt face template (MAXIMUM SECURITY)
-      const encryptedTemplate = FaceRecognitionService.encryptFaceTemplate(faceFeatures);
-      
-      // Save to user data
-      const existingIndex = systemData.enrolledUsers.findIndex(u => u.userId === userId);
-      const existing = existingIndex >= 0 ? systemData.enrolledUsers[existingIndex] : null;
-      
-      const newUser = {
-        userId,
-        userName: userName.trim(),
-        userRole,
-        hasFace: true,
-        faceTemplateEncrypted: JSON.stringify(encryptedTemplate),
-        faceEnrolledAt: new Date().toISOString(),
-        faceQualityScore: validation.score,
-        faceLivenessScore: livenessResult.score,
-        enrolledAt: new Date().toISOString(),
-        ...(existing || {}),
-        hasFingerprint: existing?.hasFingerprint || false,
-        hasNFC: existing?.hasNFC || false,
-        hasBarcode: existing?.hasBarcode || false,
-        fingerprintPublicKey: existing?.fingerprintPublicKey || null,
-        cardUid: existing?.cardUid || null,
-        barcodeId: existing?.barcodeId || null,
-        enrollmentType: existing
-          ? [
-              existing.hasFingerprint && 'fingerprint',
-              existing.hasNFC && 'nfc',
-              existing.hasBarcode && 'barcode',
-              'face'
-            ].filter(Boolean).join('-')
-          : 'face',
-      };
-
-      let updatedUsers;
-      if (existing) {
-        updatedUsers = systemData.enrolledUsers.map(u =>
-          u.userId === userId ? newUser : u
-        );
-      } else {
-        updatedUsers = [...systemData.enrolledUsers, newUser];
-      }
-
-      await updateSystemData('enrolledUsers', updatedUsers);
-      
-      // Log successful enrollment
-      FaceRecognitionService.logAttempt('enrollment', userId, true, {
-        qualityScore: validation.score,
-        livenessScore: livenessResult.score,
-        encrypted: true,
-      });
-      
-      // Clean up photo
-      await RNFS.unlink(photo.path);
-      
-      setShowFaceCamera(false);
-      setCapturing(false);
-      
-      const methods = [];
-      if (newUser.hasFingerprint) methods.push('👆');
-      if (newUser.hasNFC) methods.push('📡');
-      if (newUser.hasBarcode) methods.push('📊');
-      if (newUser.hasFace) methods.push('👤');
-      
-      Alert.alert(
-        '✅ Face Enrolled Successfully!',
-        `${userName}\n\n` +
-        `ID: ${userId}\n` +
-        `Role: ${userRole}\n\n` +
-        `Quality Score: ${validation.score}/100\n` +
-        `Liveness Score: ${livenessResult.score}/100\n\n` +
-        `🔒 Face template encrypted with AES-256\n` +
-        `🔐 Stored securely on device\n\n` +
-        `Available Methods: ${methods.join(' ')}`,
-        [{ 
-          text: 'Done',
-          onPress: () => {
-            if (!existing) {
-              setUserName('');
-              setUserId('');
-            }
-          }
-        }]
-      );
-      
-    } catch (error) {
-      setCapturing(false);
-      logError('Face Enrollment Error', error.message);
-      FaceRecognitionService.logAttempt('enrollment_failed', userId, false, { error: error.message });
-      Alert.alert('❌ Enrollment Failed', error.message);
-    }
-  };
 
   const deleteUser = (userId) => {
     Alert.alert(
@@ -730,18 +507,6 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
           <Text style={styles.buttonArrow}>›</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity 
-          style={styles.modernFaceButton}
-          onPress={enrollWithFace}>
-          <View style={styles.buttonIconContainer}>
-            <Text style={styles.buttonIcon}>👤</Text>
-          </View>
-          <View style={styles.buttonContent}>
-            <Text style={styles.buttonTitle}>Capture Face 🔒</Text>
-            <Text style={styles.buttonSubtitle}>Secure biometric enrollment</Text>
-          </View>
-          <Text style={styles.buttonArrow}>›</Text>
-        </TouchableOpacity>
       </View>
 
       {/* Enrolled Users List */}
@@ -782,11 +547,6 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
                 style={[styles.filterButton, filterType === 'barcode' && styles.filterButtonActive]}
                 onPress={() => setFilterType('barcode')}>
                 <Text style={styles.filterButtonText}>📊</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.filterButton, filterType === 'face' && styles.filterButtonActive]}
-                onPress={() => setFilterType('face')}>
-                <Text style={styles.filterButtonText}>👤</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -903,82 +663,6 @@ const EnrollScreen = ({ systemData, updateSystemData, logError }) => {
               <Text style={styles.closeModalButtonText}>Close</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
-
-      {/* Face Camera Modal */}
-      <Modal
-        visible={showFaceCamera}
-        transparent={false}
-        animationType="slide"
-        onRequestClose={() => setShowFaceCamera(false)}>
-        <View style={styles.faceCameraContainer}>
-          <View style={styles.faceCameraHeader}>
-            <TouchableOpacity 
-              style={styles.closeCameraButton}
-              onPress={() => setShowFaceCamera(false)}>
-              <Text style={styles.closeCameraButtonText}>✕ Cancel</Text>
-            </TouchableOpacity>
-            <Text style={styles.faceCameraTitle}>👤 Face Enrollment</Text>
-            <View style={{width: 70}} />
-          </View>
-          
-          {device && cameraPermission === 'granted' ? (
-            <>
-              <Camera
-                ref={cameraRef}
-                style={styles.camera}
-                device={device}
-                isActive={showFaceCamera}
-                photo={true}
-              />
-              
-              <View style={styles.faceCameraOverlay}>
-                <View style={styles.faceGuide}>
-                  <View style={[styles.faceGuideCorner, {top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3}]} />
-                  <View style={[styles.faceGuideCorner, {top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3}]} />
-                  <View style={[styles.faceGuideCorner, {bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3}]} />
-                  <View style={[styles.faceGuideCorner, {bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3}]} />
-                </View>
-                
-                <View style={styles.faceInstructions}>
-                  <Text style={styles.faceInstructionText}>
-                    {capturing ? '⏳ Processing face...' : '👤 Position your face in the frame\n\nTap the button to capture'}
-                  </Text>
-                  {faceQuality && (
-                    <Text style={styles.faceQualityText}>
-                      Quality: {faceQuality.score}% {faceQuality.isValid ? '✅' : '⚠️'}
-                    </Text>
-                  )}
-                  {faceQuality && faceQuality.warnings.length > 0 && (
-                    <Text style={styles.faceWarningText}>
-                      {faceQuality.warnings[0]}
-                    </Text>
-                  )}
-                </View>
-                
-                {!capturing && (
-                  <TouchableOpacity 
-                    style={styles.captureButton}
-                    onPress={captureFace}>
-                    <View style={styles.captureButtonInner} />
-                  </TouchableOpacity>
-                )}
-                
-                {capturing && (
-                  <ActivityIndicator size="large" color="#fff" style={styles.capturingIndicator} />
-                )}
-              </View>
-            </>
-          ) : (
-            <View style={styles.cameraPermissionView}>
-              <Text style={styles.cameraPermissionText}>
-                {cameraPermission === 'denied' 
-                  ? '❌ Camera permission denied. Please enable in settings.'
-                  : '📷 Requesting camera permission...'}
-              </Text>
-            </View>
-          )}
         </View>
       </Modal>
 
@@ -1259,130 +943,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 12,
     elevation: 8,
-  },
-  modernFaceButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f97316',
-    padding: 20,
-    borderRadius: 16,
-    marginBottom: 16,
-    shadowColor: '#f97316',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  faceCameraContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  faceCameraHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    paddingTop: 50,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-  },
-  closeCameraButton: {
-    padding: 10,
-  },
-  closeCameraButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  faceCameraTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  camera: {
-    flex: 1,
-  },
-  faceCameraOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  faceGuide: {
-    width: 280,
-    height: 350,
-    borderRadius: 140,
-    borderWidth: 3,
-    borderColor: '#f97316',
-    borderStyle: 'dashed',
-  },
-  faceGuideCorner: {
-    position: 'absolute',
-    width: 50,
-    height: 50,
-    borderColor: '#f97316',
-  },
-  faceInstructions: {
-    position: 'absolute',
-    top: 100,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  faceInstructionText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  faceQualityText: {
-    color: '#4ade80',
-    fontSize: 14,
-    marginTop: 8,
-    fontWeight: '600',
-  },
-  faceWarningText: {
-    color: '#fbbf24',
-    fontSize: 13,
-    marginTop: 4,
-    textAlign: 'center',
-  },
-  captureButton: {
-    position: 'absolute',
-    bottom: 50,
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(249, 115, 22, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 4,
-    borderColor: '#f97316',
-  },
-  captureButtonInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#f97316',
-  },
-  capturingIndicator: {
-    position: 'absolute',
-    bottom: 70,
-  },
-  cameraPermissionView: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 40,
-  },
-  cameraPermissionText: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-    lineHeight: 24,
   },
   modalOverlay: {
     flex: 1,
