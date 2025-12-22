@@ -14,9 +14,6 @@ import {
 } from 'react-native';
 import ReactNativeBiometrics from 'react-native-biometrics';
 import NfcManager, { NfcTech, Ndef } from 'react-native-nfc-manager';
-import { Camera, useCameraDevices, useCodeScanner, useCameraDevice } from 'react-native-vision-camera';
-import FaceDetection from '@react-native-ml-kit/face-detection';
-import FaceRecognitionService from '../services/FaceRecognitionService';
 import RNFS from 'react-native-fs';
 
 // Import new services
@@ -31,20 +28,8 @@ const AttendanceScreen = ({ systemData, updateSystemData, logError }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showUserSelection, setShowUserSelection] = useState(false);
   const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
-  const [showFaceRecognition, setShowFaceRecognition] = useState(false);
-  const [recognizing, setRecognizing] = useState(false);
-  const [hasPermission, setHasPermission] = useState(false);
-  const devices = useCameraDevices();
-  const device = devices.back;
-  const frontDevice = useCameraDevice('front');
-  const faceCameraRef = React.useRef(null);
 
   useEffect(() => {
-    (async () => {
-      const status = await Camera.requestCameraPermission();
-      setHasPermission(status === 'granted');
-    })();
-
     // Track screen view
     analyticsService.trackScreenView('AttendanceScreen');
   }, []);
@@ -243,169 +228,9 @@ const AttendanceScreen = ({ systemData, updateSystemData, logError }) => {
   });
 
   // ==================== FACE RECOGNITION ATTENDANCE ====================
-  const markAttendanceWithFace = async () => {
-    if (systemData.enrolledUsers.length === 0) {
-      Alert.alert('⚠️ No Users', 'Please enroll users first');
-      return;
-    }
 
-    // Check if any users have face enrolled
-    const faceUsers = systemData.enrolledUsers.filter(u => u.hasFace);
-    if (faceUsers.length === 0) {
-      Alert.alert('⚠️ No Face Data', 'No users have face enrolled. Please enroll faces first.');
-      return;
-    }
 
-    if (!hasPermission) {
-      Alert.alert(
-        '📷 Camera Permission Required',
-        'Please grant camera permission for face recognition',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Open Settings', onPress: () => Linking.openSettings() }
-        ]
-      );
-      return;
-    }
 
-    if (!frontDevice) {
-      Alert.alert('❌ No Camera', 'Front camera not available on this device');
-      return;
-    }
-
-    setShowFaceRecognition(true);
-  };
-
-  const recognizeFace = async () => {
-    if (recognizing || !faceCameraRef.current) return;
-    
-    setRecognizing(true);
-    
-    try {
-      // Take photo
-      const photo = await faceCameraRef.current.takePhoto({
-        qualityPrioritization: 'quality',
-        enableShutterSound: false,
-      });
-      
-      // Detect faces in the photo using ML Kit
-      const faces = await FaceDetection.detect(photo.path, {
-        performanceMode: 'accurate',
-        landmarkMode: 'all',
-        contourMode: 'all',
-        classificationMode: 'all',
-      });
-      
-      if (faces.length === 0) {
-        setRecognizing(false);
-        Alert.alert('❌ No Face Detected', 'Please position your face in the frame and try again.');
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      if (faces.length > 1) {
-        setRecognizing(false);
-        Alert.alert('⚠️ Multiple Faces', 'Only one face should be in the frame. Please try again.');
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      const detectedFace = faces[0];
-      
-      // Validate face quality
-      const validation = FaceRecognitionService.validateFaceQuality(detectedFace);
-      
-      if (!validation.isValid) {
-        setRecognizing(false);
-        Alert.alert('⚠️ Face Quality Issue', validation.errors.join('\n'));
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      // Detect liveness (anti-spoofing)
-      const livenessResult = await FaceRecognitionService.detectLiveness(detectedFace, null);
-      
-      if (!livenessResult.isLive) {
-        setRecognizing(false);
-        Alert.alert(
-          '❌ Liveness Check Failed',
-          `Score: ${livenessResult.score}/100\n\n` +
-          `Possible photo/video detected. Please ensure you are a real person.`
-        );
-        FaceRecognitionService.logAttempt('recognition_failed', 'unknown', false, { reason: 'liveness_failed', score: livenessResult.score });
-        await RNFS.unlink(photo.path);
-        return;
-      }
-      
-      // Extract face features
-      const detectedFeatures = FaceRecognitionService.extractFaceFeatures(detectedFace);
-      
-      // Compare with all enrolled faces (1:N identification)
-      const faceUsers = systemData.enrolledUsers.filter(u => u.hasFace);
-      let bestMatch = null;
-      let highestConfidence = 0;
-      
-      for (const user of faceUsers) {
-        try {
-          const encryptedTemplate = JSON.parse(user.faceTemplateEncrypted);
-          const storedFeatures = FaceRecognitionService.decryptFaceTemplate(encryptedTemplate);
-          
-          const comparison = FaceRecognitionService.compareFaces(detectedFeatures, storedFeatures);
-          
-          if (comparison.isMatch && comparison.confidence > highestConfidence) {
-            highestConfidence = comparison.confidence;
-            bestMatch = { user, confidence: comparison.confidence };
-          }
-        } catch (error) {
-          console.error(`Error comparing with user ${user.userId}:`, error);
-        }
-      }
-      
-      // Clean up photo
-      await RNFS.unlink(photo.path);
-      
-      setShowFaceRecognition(false);
-      setRecognizing(false);
-      
-      if (bestMatch) {
-        // Found a match!
-        FaceRecognitionService.logAttempt('recognition', bestMatch.user.userId, true, {
-          confidence: bestMatch.confidence,
-          livenessScore: livenessResult.score,
-          qualityScore: validation.score,
-        });
-        
-        recordAttendance(bestMatch.user, 'face', {
-          faceConfidence: (bestMatch.confidence * 100).toFixed(1) + '%',
-          livenessScore: livenessResult.score,
-          qualityScore: validation.score,
-          scanDuration: Date.now(),
-        });
-      } else {
-        // No match found
-        FaceRecognitionService.logAttempt('recognition_failed', 'unknown', false, {
-          reason: 'no_match',
-          attemptedMatches: faceUsers.length,
-        });
-        
-        Alert.alert(
-          '❌ Face Not Recognized',
-          `No matching face found in database.\n\n` +
-          `Checked ${faceUsers.length} enrolled face(s).\n\n` +
-          `Please ensure:\n` +
-          `• You are enrolled in the system\n` +
-          `• Lighting is good\n` +
-          `• Face is clearly visible`
-        );
-      }
-      
-    } catch (error) {
-      setRecognizing(false);
-      logError('Face Recognition Error', error.message);
-      FaceRecognitionService.logAttempt('recognition_failed', 'unknown', false, { error: error.message });
-      Alert.alert('❌ Recognition Failed', error.message);
-    }
-  };
 
   const recordAttendance = async (user, method, extraData = {}) => {
     const startTime = Date.now();
@@ -653,19 +478,7 @@ const AttendanceScreen = ({ systemData, updateSystemData, logError }) => {
           <Text style={styles.buttonArrow}>›</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity 
-          style={[styles.modernScanButton, styles.faceButton]}
-          onPress={markAttendanceWithFace}
-          disabled={scanning || recognizing}>
-          <View style={styles.buttonIconContainer}>
-            <Text style={styles.buttonIcon}>👤</Text>
-          </View>
-          <View style={styles.scanContent}>
-            <Text style={styles.scanTitle}>Recognize Face 🔒</Text>
-            <Text style={styles.scanSubtitle}>Secure biometric scan</Text>
-          </View>
-          <Text style={styles.buttonArrow}>›</Text>
-        </TouchableOpacity>
+
 
         {scanning && (
           <View style={styles.scanningIndicator}>
@@ -825,62 +638,6 @@ const AttendanceScreen = ({ systemData, updateSystemData, logError }) => {
                 onPress={() => setShowBarcodeScanner(false)}>
                 <Text style={styles.cameraCancelText}>Cancel</Text>
               </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
-      )}
-
-      {/* Face Recognition Camera Modal */}
-      {showFaceRecognition && frontDevice && (
-        <Modal
-          visible={showFaceRecognition}
-          transparent={false}
-          animationType="slide"
-          onRequestClose={() => setShowFaceRecognition(false)}>
-          <View style={styles.faceCameraContainer}>
-            <View style={styles.faceCameraHeader}>
-              <TouchableOpacity 
-                style={styles.closeFaceCamera}
-                onPress={() => setShowFaceRecognition(false)}>
-                <Text style={styles.closeFaceCameraText}>✕ Cancel</Text>
-              </TouchableOpacity>
-              <Text style={styles.faceCameraTitle}>👤 Face Recognition</Text>
-              <View style={{width: 70}} />
-            </View>
-            
-            <Camera
-              ref={faceCameraRef}
-              style={styles.camera}
-              device={frontDevice}
-              isActive={showFaceRecognition}
-              photo={true}
-            />
-            
-            <View style={styles.faceOverlay}>
-              <View style={styles.faceGuideOuter}>
-                <View style={[styles.faceGuideCorner, {top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4}]} />
-                <View style={[styles.faceGuideCorner, {top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4}]} />
-                <View style={[styles.faceGuideCorner, {bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4}]} />
-                <View style={[styles.faceGuideCorner, {bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4}]} />
-              </View>
-              
-              <View style={styles.faceInstructionsBox}>
-                <Text style={styles.faceInstructionText}>
-                  {recognizing ? '⏳ Analyzing face...' : '👤 Look at the camera\n\nTap button to scan'}
-                </Text>
-              </View>
-              
-              {!recognizing && (
-                <TouchableOpacity 
-                  style={styles.faceRecognizeButton}
-                  onPress={recognizeFace}>
-                  <View style={styles.faceRecognizeButtonInner} />
-                </TouchableOpacity>
-              )}
-              
-              {recognizing && (
-                <ActivityIndicator size="large" color="#fff" style={styles.faceRecognizingIndicator} />
-              )}
             </View>
           </View>
         </Modal>
@@ -1234,94 +991,6 @@ const styles = StyleSheet.create({
   barcodeButton: {
     backgroundColor: '#a855f7',
     shadowColor: '#a855f7',
-  },
-  faceButton: {
-    backgroundColor: '#f97316',
-    shadowColor: '#f97316',
-  },
-  faceCameraContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  faceCameraHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    paddingTop: 50,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-  },
-  closeFaceCamera: {
-    padding: 10,
-  },
-  closeFaceCameraText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  faceCameraTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  faceOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  faceGuideOuter: {
-    width: 280,
-    height: 350,
-    borderRadius: 140,
-    borderWidth: 3,
-    borderColor: '#f97316',
-    borderStyle: 'dashed',
-  },
-  faceGuideCorner: {
-    position: 'absolute',
-    width: 50,
-    height: 50,
-    borderColor: '#f97316',
-  },
-  faceInstructionsBox: {
-    position: 'absolute',
-    top: 100,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  faceInstructionText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  faceRecognizeButton: {
-    position: 'absolute',
-    bottom: 50,
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(249, 115, 22, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 4,
-    borderColor: '#f97316',
-  },
-  faceRecognizeButtonInner: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#f97316',
-  },
-  faceRecognizingIndicator: {
-    position: 'absolute',
-    bottom: 70,
   },
   cameraContainer: {
     flex: 1,
