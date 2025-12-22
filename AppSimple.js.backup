@@ -1,0 +1,711 @@
+import React, {useState, useEffect} from 'react';
+import {
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View,
+  ScrollView,
+  TouchableOpacity,
+  Platform,
+  PermissionsAndroid,
+  Alert,
+  TextInput,
+} from 'react-native';
+import ReactNativeBiometrics from 'react-native-biometrics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Pre-defined users (you can expand this)
+const USERS_DATABASE = [
+  { id: '1001234567', name: 'John Doe', role: 'Student', grade: '10-A' },
+  { id: '1001234568', name: 'Jane Smith', role: 'Student', grade: '10-B' },
+  { id: '1001234569', name: 'Mike Johnson', role: 'Teacher', department: 'Mathematics' },
+];
+
+function App() {
+  const [deviceInfo, setDeviceInfo] = useState({
+    platform: Platform.OS,
+    version: Platform.Version,
+    fingerprint: 'Checking...',
+    usbHost: 'Checking...',
+    gps: 'Checking...',
+    internet: 'Checking...',
+  });
+  
+  const [enrolledUsers, setEnrolledUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState('');
+
+  useEffect(() => {
+    checkDeviceCapabilities();
+    loadEnrolledUsers();
+  }, []);
+
+  const loadEnrolledUsers = async () => {
+    try {
+      const enrolled = await AsyncStorage.getItem('enrolledUsers');
+      if (enrolled) {
+        setEnrolledUsers(JSON.parse(enrolled));
+      }
+    } catch (error) {
+      console.log('Error loading enrolled users:', error);
+    }
+  };
+
+  const saveEnrolledUser = async (userId, publicKey) => {
+    try {
+      const user = USERS_DATABASE.find(u => u.id === userId);
+      if (!user) {
+        Alert.alert('Error', 'User not found in database');
+        return;
+      }
+
+      const newEnrolled = [...enrolledUsers, { userId, publicKey, ...user }];
+      await AsyncStorage.setItem('enrolledUsers', JSON.stringify(newEnrolled));
+      setEnrolledUsers(newEnrolled);
+      
+      Alert.alert(
+        '✅ Enrollment Successful!',
+        `${user.name} has been enrolled successfully.\n\nThey can now use fingerprint for attendance.`,
+        [{ text: 'OK' }]
+      );
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save enrollment: ' + error.message);
+    }
+  };
+
+  const checkDeviceCapabilities = async () => {
+    // Check GPS
+    let gpsStatus = '❌ Not Available';
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        );
+        if (granted) {
+          gpsStatus = '✅ Permission Granted';
+        } else {
+          gpsStatus = '⚠️ Permission Required';
+        }
+      } catch (err) {
+        gpsStatus = '❌ Error checking GPS';
+      }
+    } else {
+      gpsStatus = '⚠️ iOS - Check Settings';
+    }
+
+    // Check Internet
+    let internetStatus = '❌ Offline';
+    try {
+      const response = await fetch('https://www.google.com', {
+        method: 'HEAD',
+      });
+      internetStatus = response.ok ? '✅ Connected' : '⚠️ Limited';
+    } catch (err) {
+      internetStatus = '❌ No Connection';
+    }
+
+    setDeviceInfo({
+      platform: Platform.OS === 'android' ? '✅ Android' : Platform.OS,
+      version: `API ${Platform.Version}`,
+      fingerprint: Platform.OS === 'android' ? '✅ Supported' : '❌ Not Supported',
+      usbHost: Platform.OS === 'android' ? '✅ USB OTG Capable' : '❌ Not Supported',
+      gps: gpsStatus,
+      internet: internetStatus,
+    });
+  };
+
+  const testServerConnection = () => {
+    fetch('https://darkviolet-dotterel-146840.hostingersite.com/attendance/api/sync.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Token': 'kiosk_main_gate_2024',
+      },
+      body: JSON.stringify({
+        uid: 'TEST123',
+        device_id: 'EMULATOR_TEST',
+        timestamp: new Date().toISOString(),
+      }),
+    })
+      .then(response => response.json())
+      .then(data => {
+        alert('✅ SERVER CONNECTED!\n\n' + JSON.stringify(data, null, 2));
+      })
+      .catch(error => {
+        alert('❌ CONNECTION FAILED!\n\n' + error.message);
+      });
+  };
+
+  const requestGPSPermission = async () => {
+    if (Platform.OS !== 'android') {
+      alert('GPS permissions are managed in iOS Settings');
+      return;
+    }
+    
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        {
+          title: 'GPS Permission',
+          message: 'This app needs GPS access for attendance geofencing',
+          buttonPositive: 'OK',
+        },
+      );
+      if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+        alert('✅ GPS Permission Granted!');
+        checkDeviceCapabilities();
+      } else {
+        alert('❌ GPS Permission Denied');
+      }
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  };
+
+  const enrollFingerprint = async () => {
+    if (!selectedUserId) {
+      Alert.alert('⚠️ Select User', 'Please select a user ID to enroll their fingerprint.');
+      return;
+    }
+
+    const user = USERS_DATABASE.find(u => u.id === selectedUserId);
+    if (!user) {
+      Alert.alert('Error', 'Invalid user ID');
+      return;
+    }
+
+    // Check if already enrolled
+    const alreadyEnrolled = enrolledUsers.find(u => u.userId === selectedUserId);
+    if (alreadyEnrolled) {
+      Alert.alert('ℹ️ Already Enrolled', `${user.name} is already enrolled. They can use fingerprint authentication.`);
+      return;
+    }
+
+    const rnBiometrics = new ReactNativeBiometrics({ allowDeviceCredentials: true });
+
+    rnBiometrics.isSensorAvailable()
+      .then((resultObject) => {
+        const { available } = resultObject;
+
+        if (available) {
+          Alert.alert(
+            '📝 Enroll Fingerprint',
+            `Enroll fingerprint for:\n\n${user.name}\nID: ${user.id}\n\nReady to scan?`,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Scan Fingerprint',
+                onPress: () => {
+                  rnBiometrics.createKeys()
+                    .then((resultObject) => {
+                      const { publicKey } = resultObject;
+                      
+                      rnBiometrics.createSignature({
+                        promptMessage: `Enroll fingerprint for ${user.name}`,
+                        payload: selectedUserId,
+                      })
+                        .then((resultObject) => {
+                          const { success } = resultObject;
+                          
+                          if (success) {
+                            saveEnrolledUser(selectedUserId, publicKey);
+                            setSelectedUserId(''); // Clear selection
+                          } else {
+                            Alert.alert('❌ Enrollment Failed', 'Fingerprint scan was not successful. Try again.');
+                          }
+                        })
+                        .catch(() => {
+                          Alert.alert('Error', 'Failed to create fingerprint signature');
+                        });
+                    })
+                    .catch(() => {
+                      Alert.alert('Error', 'Failed to create biometric keys');
+                    });
+                }
+              }
+            ]
+          );
+        } else {
+          Alert.alert('❌ Not Available', 'Biometric authentication is not available on this device.');
+        }
+      });
+  };
+
+  const readFingerprint = async () => {
+    if (enrolledUsers.length === 0) {
+      Alert.alert(
+        '⚠️ No Enrolled Users',
+        'Please enroll at least one user first before taking attendance.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    const rnBiometrics = new ReactNativeBiometrics({ allowDeviceCredentials: true });
+
+    rnBiometrics.isSensorAvailable()
+      .then((resultObject) => {
+        const { available, biometryType } = resultObject;
+
+        if (available && (biometryType === ReactNativeBiometrics.Biometrics || biometryType === ReactNativeBiometrics.TouchID || biometryType === ReactNativeBiometrics.FaceID)) {
+          Alert.alert(
+            '🏫 Mark Attendance',
+            'Authenticate with your fingerprint to record attendance.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Authenticate',
+                onPress: () => {
+                  rnBiometrics.createSignature({
+                    promptMessage: 'Authenticate to mark attendance',
+                    payload: 'attendance_' + Date.now(),
+                    cancelButtonText: 'Cancel'
+                  })
+                    .then((resultObject) => {
+                      const { success, signature } = resultObject;
+
+                      if (success) {
+                        // Find matching user (in real scenario, you'd verify signature)
+                        // For demo, we'll use the first enrolled user or prompt selection
+                        if (enrolledUsers.length === 1) {
+                          const user = enrolledUsers[0];
+                          markAttendance(user);
+                        } else {
+                          // Multiple users - show selection
+                          Alert.alert(
+                            '✅ Authenticated!',
+                            'Select your name:',
+                            enrolledUsers.map(user => ({
+                              text: `${user.name} (${user.id})`,
+                              onPress: () => markAttendance(user)
+                            })).concat([{ text: 'Cancel', style: 'cancel' }])
+                          );
+                        }
+                      } else {
+                        Alert.alert('❌ Authentication Failed', 'Fingerprint not recognized. Try again.');
+                      }
+                    })
+                    .catch(() => {
+                      Alert.alert('❌ Cancelled', 'Authentication was cancelled.');
+                    });
+                }
+              }
+            ]
+          );
+        } else {
+          Alert.alert('❌ Not Available', 'Biometric authentication is not available.');
+        }
+      });
+  };
+
+  const markAttendance = (user) => {
+    Alert.alert(
+      '✅ Authenticated Successfully!',
+      `Recording attendance for:\n\n${user.name}\nID: ${user.id}\nRole: ${user.role}\n\nTimestamp: ${new Date().toLocaleString()}`,
+      [{ text: 'OK' }]
+    );
+
+    // Send to server
+    fetch('https://darkviolet-dotterel-146840.hostingersite.com/attendance/api/sync.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Token': 'kiosk_main_gate_2024',
+      },
+      body: JSON.stringify({
+        uid: user.id,
+        device_id: 'FINGERPRINT_KIOSK',
+        timestamp: new Date().toISOString(),
+        type: 'fingerprint',
+        user_name: user.name,
+        user_role: user.role,
+        location: { latitude: 0, longitude: 0 }
+      }),
+    })
+      .then(response => response.json())
+      .then(data => {
+        setTimeout(() => {
+          Alert.alert(
+            '✅ Attendance Recorded!',
+            `${user.name}'s attendance has been successfully recorded.\n\nID: ${user.id}\nTime: ${new Date().toLocaleTimeString()}`,
+            [{ text: 'Done' }]
+          );
+        }, 500);
+      })
+      .catch(error => {
+        Alert.alert(
+          '⚠️ Server Error',
+          `Authentication successful but failed to sync.\n\nError: ${error.message}`,
+          [{ text: 'OK' }]
+        );
+      });
+  };
+
+  const readRFIDTag = () => {
+    alert(
+      '📡 RFID/BARCODE SCANNER\n\n' +
+      'Scan your RFID tag or barcode now...\n\n' +
+      'Waiting for input from USB scanner...'
+    );
+    
+    // Simulate RFID/Barcode scan after 2 seconds
+    setTimeout(() => {
+      const mockUID = '1001234567'; // Simulated UID
+      alert(
+        '✅ TAG SCANNED!\n\n' +
+        'UID: ' + mockUID + '\n' +
+        'Type: RFID Card\n' +
+        'Timestamp: ' + new Date().toLocaleTimeString() + '\n\n' +
+        'Sending to server...'
+      );
+      
+      // Send to server
+      fetch('https://darkviolet-dotterel-146840.hostingersite.com/attendance/api/sync.php', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Device-Token': 'kiosk_main_gate_2024',
+        },
+        body: JSON.stringify({
+          uid: mockUID,
+          device_id: 'MOBILE_KIOSK',
+          timestamp: new Date().toISOString(),
+          location: {
+            latitude: 0,
+            longitude: 0,
+          },
+        }),
+      })
+        .then(response => response.json())
+        .then(data => {
+          alert('✅ ATTENDANCE RECORDED!\n\n' + JSON.stringify(data, null, 2));
+        })
+        .catch(error => {
+          alert('❌ FAILED TO RECORD!\n\n' + error.message);
+        });
+    }, 2000);
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ScrollView contentContainerStyle={styles.scrollView}>
+        
+        {/* Header */}
+        <VieEnrollment Section */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>👥 USER ENROLLMENT</Text>
+          <Text style={styles.infoTextSmall}>
+            Enrolled Users: {enrolledUsers.length}
+          </Text>
+          {enrolledUsers.map((user, index) => (
+            <View key={index} style={styles.enrolledUser}>
+              <Text style={styles.enrolledUserText}>
+                ✅ {user.name} ({user.id})
+              </Text>
+            </View>
+          ))}
+          
+          <Text style={styles.label}>Select User to Enroll:</Text>
+          <View style={styles.pickerContainer}>
+            {USERS_DATABASE.map((user) => (
+              <TouchableOpacity
+                key={user.id}
+                style={[
+                  styles.userOption,
+                  selectedUserId === user.id && styles.userOptionSelected
+                ]}
+                onPress={() => setSelectedUserId(user.id)}>
+                <Text style={selectedUserId === user.id ? styles.userOptionTextSelected : styles.userOptionText}>
+                  {user.name} - {user.id}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          
+          <TouchableOpacity style={styles.enrollButton} onPress={enrollFingerprint}>
+            <Text style={styles.buttonText}>📝 ENROLL SELECTED USER</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* w style={styles.header}>
+          <Text style={styles.title}>📱 Attendance Kiosk</Text>
+          <Text style={styles.subtitle}>System Diagnostics</Text>
+        </View>
+
+        {/* Device Status */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>📱 DEVICE STATUS</Text>
+          <View style={styles.row}>
+            <Text style={styles.label}>Platform:</Text>
+            <Text style={styles.value}>{deviceInfo.platform}</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.label}>Version:</Text>
+            <Text style={styles.value}>{deviceInfo.version}</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.label}>Internet:</Text>
+            <Text style={styles.value}>{deviceInfo.internet}</Text>
+          </View>
+        </View>
+
+        {/* Hardware Capabilities */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>🔧 HARDWARE CAPABILITIES</Text>
+          <View style={styles.row}>
+            <Text style={styles.label}>Fingerprint Scanner:</Text>
+            <Text style={styles.value}>{deviceInfo.fingerprint}</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.label}>USB Barcode Scanner:</Text>
+            <Text style={styles.value}>{deviceInfo.usbHost}</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.label}>GPS Location:</Text>
+            <Text style={styles.value}>{deviceInfo.gps}</Text>
+          </View>
+        </View>
+
+        {/* Server Config */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>🌐 SERVER CONNECTION</Text>
+          <Text style={styles.serverUrl}>
+            https://darkviolet-dotterel-146840.hostingersite.com
+          </Text>
+          <Text style={styles.serverStatus}>Status: Ready to Test</Text>
+        </View>
+
+        {/* Action Buttons */}
+        <TouchableOpacity style={styles.fingerprintButton} onPress={readFingerprint}>
+          <Text style={styles.buttonText}>👆 READ FINGERPRINT</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.rfidButton} onPress={readRFIDTag}>
+          <Text style={styles.buttonText}>📡 READ RFID TAG / BARCODE</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.primaryButton} onPress={testServerConnection}>
+          <Text style={styles.buttonText}>🧪 TEST SERVER CONNECTION</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.secondaryButton} onPress={requestGPSPermission}>
+          <Text style={styles.buttonText}>📍 REQUEST GPS PERMISSION</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.refreshButton} onPress={checkDeviceCapabilities}>
+          <Text style={styles.buttonText}>🔄 REFRESH STATUS</Text>
+        </TouchableOpacity>
+
+        {/* Instructions */}
+        <View style={styles.infoBox}>
+          <Text style={styles.infoTitle}>📋 WHAT TO CHECK:</Text>
+          <Text style={styles.infoText}>
+            ✓ Internet should show "✅ Connected"{'\n'}
+            ✓ GPS should show "✅ Permission Granted"{'\n'}
+            ✓ USB Scanner can be plugged in anytime{'\n'}
+            ✓ Fingerprint works on real devices only{'\n'}
+            ✓ Test server button should return success
+          </Text>
+        </View>
+
+  enrollButton: {
+    backgroundColor: '#f39c12',
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  pickerContainer: {
+    marginVertical: 10,
+  },
+  userOption: {
+    padding: 12,
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: '#ddd',
+  },
+  userOptionSelected: {
+    backgroundColor: '#e8f5e9',
+    borderColor: '#4caf50',
+  },
+  userOptionText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  userOptionTextSelected: {
+    fontSize: 14,
+    color: '#2e7d32',
+    fontWeight: 'bold',
+  },
+  enrolledUser: {
+    padding: 8,
+    backgroundColor: '#e8f5e9',
+    borderRadius: 5,
+    marginBottom: 5,
+  },
+  enrolledUserText: {
+    fontSize: 13,
+    color: '#2e7d32',
+  },
+  infoTextSmall: {
+    fontSize: 12,
+    color: '#666',
+    marginBottom: 10,
+  },
+        {/* Footer */}
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Built: December 18, 2025</Text>
+          <Text style={styles.footerText}>Environment: Production</Text>
+        </View>
+
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f0f0f0',
+  },
+  scrollView: {
+    padding: 15,
+  },
+  header: {
+    backgroundColor: '#667eea',
+    padding: 25,
+    borderRadius: 12,
+    marginBottom: 15,
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  subtitle: {
+    fontSize: 16,
+    color: 'white',
+    marginTop: 5,
+    opacity: 0.9,
+  },
+  card: {
+    backgroundColor: 'white',
+    padding: 18,
+    borderRadius: 10,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    paddingBottom: 8,
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f5f5f5',
+  },
+  label: {
+    fontSize: 14,
+    color: '#666',
+    fontWeight: '500',
+  },
+  value: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: 'bold',
+  },
+  serverUrl: {
+    fontSize: 12,
+    color: '#667eea',
+    marginBottom: 8,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  serverStatus: {
+    fontSize: 14,
+    color: '#2ecc71',
+    fontWeight: 'bold',
+  fingerprintButton: {
+    backgroundColor: '#9b59b6',
+    padding: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  rfidButton: {
+    backgroundColor: '#e74c3c',
+    padding: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  },
+  primaryButton: {
+    backgroundColor: '#2ecc71',
+    padding: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  secondaryButton: {
+    backgroundColor: '#3498db',
+    padding: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  refreshButton: {
+    backgroundColor: '#95a5a6',
+    padding: 18,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  buttonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  infoBox: {
+    backgroundColor: '#fff3cd',
+    padding: 15,
+    borderRadius: 10,
+    marginVertical: 10,
+    borderLeftWidth: 4,
+    borderLeftColor: '#ffc107',
+  },
+  infoTitle: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#856404',
+    marginBottom: 8,
+  },
+  infoText: {
+    fontSize: 13,
+    color: '#856404',
+    lineHeight: 20,
+  },
+  footer: {
+    alignItems: 'center',
+    paddingVertical: 15,
+  },
+  footerText: {
+    fontSize: 11,
+    color: '#999',
+    marginBottom: 3,
+  },
+});
+
+export default App;

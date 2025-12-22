@@ -1,0 +1,29 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Android
+android/.gradle
+android/app/build
+android/build
+android/gradle
+android/gradlew
+android/gradlew.bat
+android/local.properties
+*.apk
+
+# iOS
+ios/Pods/
+ios/build/
+
+# Misc
+.DS_Store
+*.log
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.iml
